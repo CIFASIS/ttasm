@@ -136,11 +136,14 @@ tableChecksum table =
 
 tableEntry tag table offset = _tableDef tag (tableChecksum table) offset (fromIntegral $ BS.length table)
 
-_cmapIndex version nSub = do
+_cmapTable version nSub tables = do
     ushort version
     ushort nSub
+    tables
 
-cmapIndex version nSub = _cmapIndex 0 nSub
+cmapTable tables = do
+    let n = slen tables
+    _cmapTable 0 n tables
 
 cmapEnc pID pSpecID offset = do
     ushort pID
