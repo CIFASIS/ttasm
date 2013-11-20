@@ -11,6 +11,9 @@ main = do
     s <- BS.readFile $ fileName
     let v = decodeLazy s :: Either String TTF
     putStrLn $ ppShow v
+    case v of
+        Left msg -> putStrLn msg
+        Right t  -> B.writeFile "out.ttf" $ encode t 
     --let t = ttfTables [PostTable $ Post 0 0 0 0 0 0 0 0 0]
     --B.writeFile "out.ttf" $ runPut t
 

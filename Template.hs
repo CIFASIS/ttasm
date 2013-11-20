@@ -17,79 +17,107 @@ import Data.Maybe
 type Fixed = Word32
 type FWord = Int16
 type DateTime = Word64
-newtype AString = AString [Char] deriving Show
-data PString = PString Word8 [Char] deriving Show
-
-instance Serialize PString where
-    get = do
-        n <- get
-        str <- getN n
-        return (PString n str)
-    put (PString l s) = do put l; put s
-
-getN n = replicateM (fromIntegral n) get
- 
-instance Serialize AString where
-    get = do return $ AString ""
-    put (AString cs) = puts cs
-
-getStr n = do
-    str <- getN n
-    return (AString str)
+data PArray w a = PArray w [a] deriving Show
 
 puts x = mapM_ put x
 
+instance (Serialize w, Serialize as, Integral w) => Serialize (PArray w as) where
+    get = do
+        n  <- get
+        as <- getN n
+        return (PArray n as)
+
+    put (PArray n s) = do
+        put n
+        puts s
+
+type PString = PArray Word8 Char
+
+newtype BArray a = BArray [a] deriving Show
+
+instance (Serialize as) => Serialize (BArray as) where
+    get = do error "Infinite array get!"
+    put (BArray cs) = puts cs
+
+getN n = replicateM (fromIntegral n) get
+
+type BString = BArray Char
+ 
+getb n = do
+    a <- getN n
+    return (BArray a)
+
+--instance (Serialize w, Serialize as, Integral w) => Serialize (BArray (PArray w as)) where
+--    get = do return (BArray [])
+
 data TTF = TTF {
     ttfOffset :: Offset,
-    tableDefs :: [TableDef],
-    tables    :: [Table]
+    tableDefs :: BArray TableDef,
+    tables    :: BArray Table
     } deriving (Generic, Show)
 
 instance Serialize TTF where
     get = do
         o@(Offset s n r e sh) <- get
         tdefs <- replicateM (fromIntegral n) get
+        let sdefs = sortBy (\(TableDef _ _ l _) (TableDef _ _ r _) -> l `compare` r) tdefs
         let start = 12 + 16*(fromIntegral n)
-        tabs <- mapM (\e -> lookAhead (tableFromTag start e)) tdefs
-        return $ TTF o tdefs tabs
-
-tableFromTag start (TableDef (AString tag) _ off len) = do
+        tabs <- mapM (\e -> lookAhead (tableFromTag start e)) sdefs
+        return $ TTF o (BArray tdefs) (BArray tabs)
+    put (TTF o d (BArray ts)) = do
+        put o
+        put d
+        mapM_ putByteString $ map padbs $ map encode ts
+        
+tableFromTag :: Word32 -> TableDef -> (Get Table)
+tableFromTag start (TableDef (BArray tag) _ off len) = do
     skip $ fromIntegral (off-start)
-    bs <- getBytes $ fromIntegral len
-    case (runGet (fromTag tag) bs) of
-        (Left m) -> error m
+    bs <- getBytes $ (fromIntegral len)-1
+    case (runGet (fromTag tag bs) bs) of
+        (Left m)  -> error m
         (Right t) -> return t
 
-fromTag tag = do
+fromTag tag bs = do
     case tag of
-        "cmap" -> liftM CmapTable get
-        "glyf" -> liftM GlyfTable get
-        "head" -> liftM HeadTable get
-        "hhea" -> liftM HheaTable get
-        "hmtx" -> liftM HmtxTable get
-        "loca" -> liftM LocaTable get
-        "maxp" -> liftM MaxpTable get
-        "name" -> liftM NameTable get
-        "post" -> liftM PostTable get
-        _      -> return $ UnknownTable tag
+        --"cmap" -> liftM CmapTable get
+        --"glyf" -> liftM GlyfTable get
+        --"head" -> liftM HeadTable get
+        --"hhea" -> liftM HheaTable get
+        --"hmtx" -> liftM HmtxTable get
+        --"loca" -> liftM LocaTable get
+        --"maxp" -> liftM MaxpTable get
+        --"name" -> liftM NameTable get
+        --"post" -> liftM PostTable get
+        _      -> return $ UnknownTable bs
 
 tagFromTable t =
     case t of
-        (CmapTable _) -> AString "cmap"
-        (GlyfTable _) -> AString "glyf"
-        (LocaTable _) -> AString "loca"
-        (HeadTable _) -> AString "head"
-        (HheaTable _) -> AString "hhea"
-        (HmtxTable _) -> AString "hmtx"
-        (MaxpTable _) -> AString "maxp"
-        (NameTable _) -> AString "name"
-        (PostTable _) -> AString "post"
-        (UnknownTable tag) -> AString tag
+        --(CmapTable _) -> BArray "cmap"
+        --(GlyfTable _) -> BArray "glyf"
+        --(HeadTable _) -> BArray "head"
+        --(HheaTable _) -> BArray "hhea"
+        --(HmtxTable _) -> BArray "hmtx"
+        --(LocaTable _) -> BArray "loca"
+        --(MaxpTable _) -> BArray "maxp"
+        --(NameTable _) -> BArray "name"
+        --(PostTable _) -> BArray "post"
+        (UnknownTable _) -> BArray "????" --tag
+
+padbs bs = 
+    let bsl = fromIntegral $ BS.length bs
+        pad = 4 - (bsl `mod` 4)
+    in bs `BS.append` (BS.pack (take pad $ repeat 0))
+
+accum a (tag, bs) = let
+    padd  = padbs bs
+    anext = a + (fromIntegral $ BS.length padd)
+    dnext = tableEntry tag padd (fromIntegral a)
+    in (anext, dnext)
 
 ttfTables tables = do
     let n = fromIntegral $ length tables
-    let tabs  = map (\t -> (tagFromTable t,encode t)) tables
-    let (_, tdefs) = mapAccumL (\a (tag, bs) -> (a + (fromIntegral $ BS.length bs), tableEntry tag bs (fromIntegral a))) (12 + 16*n) tabs
+    let tabs = map (\t -> (tagFromTable t,encode t)) tables
+    let (_, tdefs) = mapAccumL accum (12 + 16*(fromIntegral n)) tabs
     put $ offset n
     puts tdefs
     puts $ map snd tabs
@@ -110,7 +138,7 @@ offset numTables =
     in Offset 0x10000 numTables (sRange*16) eSel (numTables*16 - sRange*16)
     
 data TableDef = TableDef {
-    tag         :: AString,
+    tag         :: BString,
     checkSum    :: Word32,
     off         :: Word32,
     len         :: Word32
@@ -118,7 +146,7 @@ data TableDef = TableDef {
 
 instance Serialize TableDef where
     get = do
-        tag <- getStr 4
+        tag <- getb 4
         liftM3 (TableDef tag) get get get
 
 getBS tc d = let r = runGet tc $ d
@@ -147,23 +175,21 @@ data Table = CmapTable Cmap
     | MaxpTable Maxp
     | NameTable Name
     | PostTable Post
-    | UnknownTable String deriving (Generic, Show)
-instance Serialize Table
+    | UnknownTable BS.ByteString deriving (Generic, Show)
+instance Serialize Table where
+    put (UnknownTable bs) = putByteString bs
 
 data Cmap = Cmap {
     version :: Word16,
-    nSub    :: Word16,
-    encs    :: [CmapEnc],
-    formats :: [CmapFormat]
+    encs    :: PArray Word16 CmapEnc,
+    formats :: BArray CmapFormat
     } deriving (Generic, Show)
 
 instance Serialize Cmap where
     get = do
         vers <- get
-        nSub <- get
-        encs <- getN nSub
-        fmts <- getN nSub 
-        return $ Cmap vers nSub encs fmts
+        encs@(PArray c _) <- get
+        liftM (Cmap vers encs) (getb c)
 
 {-
 cmap entries =
@@ -187,7 +213,7 @@ data CmapFormat = CmapFormat0 {
     cmapFormat  :: Word16,
     formatLen   :: Word16,
     formatLang  :: Word16,
-    glyphIndices:: [Word8]
+    glyphIndices:: BArray Word8
     } | CmapUnknown Word16 deriving (Generic, Show)
 
 instance Serialize CmapFormat where
@@ -195,15 +221,15 @@ instance Serialize CmapFormat where
         fmt  <- get
         flen <- get
         case fmt of
-            0 -> liftM2 (CmapFormat0 0 flen) get (getN 4)
+            0 -> liftM2 (CmapFormat0 0 flen) get (getb (flen-6))
             _ -> return $ CmapUnknown fmt
 
-{-
-cmapFormat0 language glyphIndices = do
-    let n = fromIntegral $ length glyphIndices
-    cmapFormat 0 n language
-    bytes glyphIndices
--}
+
+blength (BArray bs) = fromIntegral $ length bs
+
+cmapFormat0 language glyphIndices =
+    let n = (blength glyphIndices)+6
+    in CmapFormat0 0 n language glyphIndices
 
 data Glyf = Glyf GlyfDesc deriving (Generic, Show)
 instance Serialize Glyf
@@ -214,22 +240,20 @@ data GlyfDesc = GlyfDesc {
     yMin        :: Int16,
     xMax        :: Int16,
     yMax        :: Int16,
-    endPts      :: [Word16],
-    iLength     :: Word16,
-    instrs      :: [Word8],
-    pflags      :: [Word8],
-    xs          :: [Word8],
-    ys          :: [Word8]
+    endPts      :: BArray Word16,
+--    iLength     :: Word16,
+    instrs      :: PArray Word16 Word8,
+    pflags      :: BArray Word8,
+    xs          :: BArray Word8,
+    ys          :: BArray Word8
     } deriving (Generic, Show)
 
 instance Serialize GlyfDesc where
     get = do
         n <- get
-        xi <- get; yi <- get
-        xa <- get; ya <- get
-        end <- getN n
-        ilen <- get
-        liftM4 (GlyfDesc n xi yi xa ya end ilen) (getN ilen) (getN n) (getN n) (getN n)
+        (GlyfDesc n) <$> get <*> get <*> get <*> get <*> 
+                         getb n <*> get <*> getb n <*> 
+                         getb n <*> getb n
 
 {-
 data GlyphPoint = GPoint Word16 Word8 Int Int -- TODO: full glyph support
@@ -332,13 +356,15 @@ data Name = Name {
     nameFormat  :: Word16,
     count       :: Word16,
     strOffset   :: Word16,
-    nameRecords :: [NameRecord]
---    names       :: [AString]
+    nameRecords :: BArray NameRecord,
+    names       :: BS.ByteString
 } deriving (Generic, Show)
 instance Serialize Name where
     get = do
-        nf <- get; c <- get
-        liftM2 (Name nf c) get (getN c)
+        nf <- get; c <- get; o <- get; nr <- getb c
+        r  <- remaining
+        ns <- getBytes r
+        return $ Name nf c o nr ns
 
 {-
 name nameRecords names count = _name 0 count (count*12+6) nameRecords names
@@ -386,17 +412,19 @@ data Post = Post {
 instance Serialize Post
 
 data PostFormat = PostFormat2 {
-    pnGlyph     :: Word16,
-    glyphNameInd:: [Word16],
-    pNames      :: [PString]
+    glyphNameInd    :: PArray Word16 Word16,
+    pNames          :: BArray PString
     } deriving (Generic, Show)
 
 instance Serialize PostFormat where
     get = do
-        n <- get
-        i <- getN n
-        s <- get
-        return $ PostFormat2 n i [s]
+        g@(PArray n _) <- get
+        s <- whileM (do
+            n <- lookAhead get :: Get Word8
+            r <- remaining
+            return $ r > (fromIntegral n)+1
+            ) get
+        return $ PostFormat2 g (BArray s)
 {-
 post format iAngle uPos uThick fixed = _post format iAngle uPos uThick (if fixed then 1 else 0) 0 0 0 0
 
