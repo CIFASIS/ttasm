@@ -72,7 +72,7 @@ instance Serialize TTF where
 tableFromTag :: Word32 -> TableDef -> (Get Table)
 tableFromTag start (TableDef (BArray tag) _ off len) = do
     skip $ fromIntegral (off-start)
-    bs <- getBytes $ (fromIntegral len)-1
+    bs <- getBytes $ fromIntegral len
     case (runGet (fromTag tag bs) bs) of
         (Left m)  -> error m
         (Right t) -> return t
@@ -105,7 +105,7 @@ tagFromTable t =
 
 padbs bs = 
     let bsl = fromIntegral $ BS.length bs
-        pad = 4 - (bsl `mod` 4)
+        pad = 3 - ((bsl - 1)`mod` 4)
     in bs `BS.append` (BS.pack (take pad $ repeat 0))
 
 accum a (tag, bs) = let
