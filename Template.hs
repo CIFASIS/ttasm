@@ -79,28 +79,28 @@ tableFromTag start (TableDef (BArray tag) _ off len) = do
 
 fromTag tag bs = do
     case tag of
-        --"cmap" -> liftM CmapTable get
+        "cmap" -> liftM CmapTable get
         --"glyf" -> liftM GlyfTable get
-        --"head" -> liftM HeadTable get
-        --"hhea" -> liftM HheaTable get
+        "head" -> liftM HeadTable get
+        "hhea" -> liftM HheaTable get
         --"hmtx" -> liftM HmtxTable get
         --"loca" -> liftM LocaTable get
-        --"maxp" -> liftM MaxpTable get
-        --"name" -> liftM NameTable get
-        --"post" -> liftM PostTable get
+        "maxp" -> liftM MaxpTable get
+        "name" -> liftM NameTable get
+        "post" -> liftM PostTable get
         _      -> return $ UnknownTable bs
 
 tagFromTable t =
     case t of
-        --(CmapTable _) -> BArray "cmap"
+        (CmapTable _) -> BArray "cmap"
         --(GlyfTable _) -> BArray "glyf"
-        --(HeadTable _) -> BArray "head"
-        --(HheaTable _) -> BArray "hhea"
+        (HeadTable _) -> BArray "head"
+        (HheaTable _) -> BArray "hhea"
         --(HmtxTable _) -> BArray "hmtx"
         --(LocaTable _) -> BArray "loca"
-        --(MaxpTable _) -> BArray "maxp"
-        --(NameTable _) -> BArray "name"
-        --(PostTable _) -> BArray "post"
+        (MaxpTable _) -> BArray "maxp"
+        (NameTable _) -> BArray "name"
+        (PostTable _) -> BArray "post"
         (UnknownTable _) -> BArray "????" --tag
 
 padbs bs = 
@@ -177,6 +177,12 @@ data Table = CmapTable Cmap
     | PostTable Post
     | UnknownTable BS.ByteString deriving (Generic, Show)
 instance Serialize Table where
+    put (CmapTable t) = put t
+    put (HeadTable t) = put t
+    put (HheaTable t) = put t
+    put (MaxpTable t) = put t
+    put (NameTable t) = put t
+    put (PostTable t) = put t
     put (UnknownTable bs) = putByteString bs
 
 data Cmap = Cmap {
@@ -214,15 +220,24 @@ data CmapFormat = CmapFormat0 {
     formatLen   :: Word16,
     formatLang  :: Word16,
     glyphIndices:: BArray Word8
-    } | CmapUnknown Word16 deriving (Generic, Show)
+    } | CmapUnknown Word32 Word16 BS.ByteString deriving (Generic, Show)
 
 instance Serialize CmapFormat where
     get = do
-        fmt  <- get
-        flen <- get
+        fmt <- get
         case fmt of
-            0 -> liftM2 (CmapFormat0 0 flen) get (getb (flen-6))
-            _ -> return $ CmapUnknown fmt
+            0 -> do
+                flen <- get
+                liftM2 (CmapFormat0 0 flen) get (getb (flen-6))
+            _ -> do
+                flen <- get
+                liftM (CmapUnknown fmt flen) (getBytes $ (fromIntegral flen)-4)
+    put (CmapFormat0 f l a g) = do
+        puts [f, l, a]
+        put g
+    put (CmapUnknown f l bs) = do
+        put f; put l
+        putByteString bs
 
 
 blength (BArray bs) = fromIntegral $ length bs
@@ -359,12 +374,17 @@ data Name = Name {
     nameRecords :: BArray NameRecord,
     names       :: BS.ByteString
 } deriving (Generic, Show)
+
 instance Serialize Name where
     get = do
         nf <- get; c <- get; o <- get; nr <- getb c
         r  <- remaining
         ns <- getBytes r
         return $ Name nf c o nr ns
+    put (Name f c s r n) = do
+        puts [f,c,s]
+        put r
+        putByteString n
 
 {-
 name nameRecords names count = _name 0 count (count*12+6) nameRecords names
@@ -416,14 +436,18 @@ data PostFormat = PostFormat2 {
     pNames          :: BArray PString
     } deriving (Generic, Show)
 
+getPStrings :: Get [PString]
+getPStrings = do
+    whileM (do
+        r <- remaining
+        if r > 0 then liftM ((<= r) . fromIntegral) (lookAhead get :: Get Word8)
+            else return False
+        ) get
+
 instance Serialize PostFormat where
     get = do
         g@(PArray n _) <- get
-        s <- whileM (do
-            n <- lookAhead get :: Get Word8
-            r <- remaining
-            return $ r > (fromIntegral n)+1
-            ) get
+        s <- getPStrings
         return $ PostFormat2 g (BArray s)
 {-
 post format iAngle uPos uThick fixed = _post format iAngle uPos uThick (if fixed then 1 else 0) 0 0 0 0
