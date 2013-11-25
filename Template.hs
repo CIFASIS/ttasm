@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveGeneric, DefaultSignatures #-}
+{-# LANGUAGE DeriveGeneric, DefaultSignatures, FlexibleInstances, OverlappingInstances #-}
 module Template where
 
 import Data.Serialize
@@ -13,6 +13,8 @@ import Control.Monad.Loops
 import Control.Applicative
 import Data.List
 import Data.Maybe
+import qualified Data.Map as M
+import Debug.Trace
 
 type Fixed = Word32
 type FWord = Int16
@@ -20,6 +22,7 @@ type DateTime = Word64
 data PArray w a = PArray w [a] deriving Show
 
 puts x = mapM_ put x
+getN n = replicateM (fromIntegral n) get
 
 instance (Serialize w, Serialize as, Integral w) => Serialize (PArray w as) where
     get = do
@@ -39,7 +42,6 @@ instance (Serialize as) => Serialize (BArray as) where
     get = do error "Infinite array get!"
     put (BArray cs) = puts cs
 
-getN n = replicateM (fromIntegral n) get
 
 type BString = BArray Char
  
@@ -47,8 +49,15 @@ getb n = do
     a <- getN n
     return (BArray a)
 
---instance (Serialize w, Serialize as, Integral w) => Serialize (BArray (PArray w as)) where
---    get = do return (BArray [])
+instance Serialize (BArray PString) where
+    get = do
+        bs <- whileM (do
+            r <- remaining
+            if r > 0 then liftM ((<= r) . fromIntegral) (lookAhead get :: Get Word8)
+                else return False
+            ) get
+        return $ BArray bs
+    put (BArray ps) = do mapM_ put ps
 
 data TTF = TTF {
     ttfOffset :: Offset,
@@ -60,31 +69,37 @@ instance Serialize TTF where
     get = do
         o@(Offset s n r e sh) <- get
         tdefs <- replicateM (fromIntegral n) get
-        let sdefs = sortBy (\(TableDef _ _ l _) (TableDef _ _ r _) -> l `compare` r) tdefs
+        let sdefs = sortBy (\(TableDef {off=l}) (TableDef {off=r}) -> l `compare` r) tdefs
+        let mdefs = M.fromList $ map (\t@(TableDef {tag=(BArray tag)}) -> (tag, t)) sdefs
         let start = 12 + 16*(fromIntegral n)
-        tabs <- mapM (\e -> lookAhead (tableFromTag start e)) sdefs
+        head <- lookAhead (tableFromTag start (mdefs M.! "head") (M.fromList []))
+        hhea <- lookAhead (tableFromTag start (mdefs M.! "hhea") (M.fromList []))
+        maxp <- lookAhead (tableFromTag start (mdefs M.! "maxp") (M.fromList []))
+        let neededTabs = M.fromList [("head",head),("hhea",hhea),("maxp",maxp)]
+        tabs <- mapM (\e -> lookAhead (tableFromTag start e neededTabs)) sdefs 
         return $ TTF o (BArray tdefs) (BArray tabs)
     put (TTF o d (BArray ts)) = do
         put o
         put d
         mapM_ putByteString $ map padbs $ map encode ts
-        
-tableFromTag :: Word32 -> TableDef -> (Get Table)
-tableFromTag start (TableDef (BArray tag) _ off len) = do
+
+tableFromTag :: Word32 -> TableDef -> M.Map String Table -> Get Table 
+tableFromTag start (TableDef (BArray tag) _ off len) tabs = do
     skip $ fromIntegral (off-start)
     bs <- getBytes $ fromIntegral len
-    case (runGet (fromTag tag bs) bs) of
+    case (runGet (fromTag tag bs tabs) bs) of
         (Left m)  -> error m
         (Right t) -> return t
 
-fromTag tag bs = do
+fromTag :: String -> BS.ByteString -> M.Map String Table -> Get Table
+fromTag tag bs tabs = do
     case tag of
         "cmap" -> liftM CmapTable get
-        --"glyf" -> liftM GlyfTable get
+        --"glyf" -> liftM GlyfTable (getGlyf (tabs M.! "maxp"))
         "head" -> liftM HeadTable get
         "hhea" -> liftM HheaTable get
-        --"hmtx" -> liftM HmtxTable get
-        --"loca" -> liftM LocaTable get
+        "hmtx" -> liftM HmtxTable (getHmtx (tabs M.! "hhea"))
+        "loca" -> liftM LocaTable (getLoca (tabs M.! "maxp") (tabs M.! "head"))
         "maxp" -> liftM MaxpTable get
         "name" -> liftM NameTable get
         "post" -> liftM PostTable get
@@ -93,11 +108,11 @@ fromTag tag bs = do
 tagFromTable t =
     case t of
         (CmapTable _) -> BArray "cmap"
-        --(GlyfTable _) -> BArray "glyf"
+        (GlyfTable _) -> BArray "glyf"
         (HeadTable _) -> BArray "head"
         (HheaTable _) -> BArray "hhea"
-        --(HmtxTable _) -> BArray "hmtx"
-        --(LocaTable _) -> BArray "loca"
+        (HmtxTable _) -> BArray "hmtx"
+        (LocaTable _) -> BArray "loca"
         (MaxpTable _) -> BArray "maxp"
         (NameTable _) -> BArray "name"
         (PostTable _) -> BArray "post"
@@ -178,8 +193,10 @@ data Table = CmapTable Cmap
     | UnknownTable BS.ByteString deriving (Generic, Show)
 instance Serialize Table where
     put (CmapTable t) = put t
+    put (GlyfTable t) = put t
     put (HeadTable t) = put t
     put (HheaTable t) = put t
+    put (HmtxTable t) = put t
     put (MaxpTable t) = put t
     put (NameTable t) = put t
     put (PostTable t) = put t
@@ -246,8 +263,13 @@ cmapFormat0 language glyphIndices =
     let n = (blength glyphIndices)+6
     in CmapFormat0 0 n language glyphIndices
 
-data Glyf = Glyf GlyfDesc deriving (Generic, Show)
+data Glyf = Glyf (BArray GlyfDesc) deriving (Generic, Show)
 instance Serialize Glyf
+
+--getGlyf (MaxpTable m) = liftM Glyf (getb (numGlyphs m))
+getGlyf (MaxpTable m) = do
+    x <- getb 1--(numGlyphs m)
+    return $ Glyf $ traceShow x x
 
 data GlyfDesc = GlyfDesc {
     nContours   :: Word16,
@@ -256,7 +278,6 @@ data GlyfDesc = GlyfDesc {
     xMax        :: Int16,
     yMax        :: Int16,
     endPts      :: BArray Word16,
---    iLength     :: Word16,
     instrs      :: PArray Word16 Word8,
     pflags      :: BArray Word8,
     xs          :: BArray Word8,
@@ -333,8 +354,10 @@ _loca entries = do mapM_ uint entries
 loca m = _loca $ map (\(k,v) -> v) (M.toList m)
 -}
 
-data Hmtx = Hmtx HmtxEntry Int16 deriving (Generic, Show)
+data Hmtx = Hmtx (BArray HmtxEntry) deriving (Generic, Show)
 instance Serialize Hmtx
+
+getHmtx (HheaTable h) = liftM Hmtx (getb (nMetrics h))
 
 data HmtxEntry = HmtxEntry {
     advanceWidth    :: Word16,
@@ -342,8 +365,15 @@ data HmtxEntry = HmtxEntry {
     } deriving (Generic, Show)
 instance Serialize HmtxEntry
 
-data Loca = Loca Word8 deriving (Generic, Show)
+data Loca = LocaShort (BArray Word16) | LocaLong (BArray Word32) deriving (Generic, Show)
 instance Serialize Loca
+
+getLoca (MaxpTable m) (HeadTable h) =
+    let fmt = iToLoc h
+        n = numGlyphs m
+    in case fmt of
+        0 -> liftM LocaShort (getb n)
+        1 -> liftM LocaLong (getb n)
 
 data Maxp = Maxp {
     maxpVersion             :: Fixed,
@@ -436,19 +466,9 @@ data PostFormat = PostFormat2 {
     pNames          :: BArray PString
     } deriving (Generic, Show)
 
-getPStrings :: Get [PString]
-getPStrings = do
-    whileM (do
-        r <- remaining
-        if r > 0 then liftM ((<= r) . fromIntegral) (lookAhead get :: Get Word8)
-            else return False
-        ) get
 
-instance Serialize PostFormat where
-    get = do
-        g@(PArray n _) <- get
-        s <- getPStrings
-        return $ PostFormat2 g (BArray s)
+instance Serialize PostFormat
+
 {-
 post format iAngle uPos uThick fixed = _post format iAngle uPos uThick (if fixed then 1 else 0) 0 0 0 0
 
