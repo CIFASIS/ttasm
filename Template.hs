@@ -6,6 +6,7 @@ import Data.Serialize.Put
 import Data.Serialize.Get
 import GHC.Generics
 import qualified Data.ByteString as BS
+import Data.Bits
 import GHC.Int
 import GHC.Word
 import Control.Monad
@@ -94,11 +95,12 @@ tableFromTag start (TableDef (BArray tag) _ off len) tabs = do
 fromTag :: String -> BS.ByteString -> M.Map String Table -> Get Table
 fromTag tag bs tabs = do
     case tag of
-        "cmap" -> liftM CmapTable get
-        --"glyf" -> liftM GlyfTable (getGlyf (tabs M.! "maxp"))
+        --"cmap" -> liftM CmapTable get
+        "fpgm" -> liftM FpgmTable get
+        "glyf" -> liftM GlyfTable (getGlyf (tabs M.! "maxp"))
         "head" -> liftM HeadTable get
         "hhea" -> liftM HheaTable get
-        "hmtx" -> liftM HmtxTable (getHmtx (tabs M.! "hhea"))
+        "hmtx" -> liftM HmtxTable (getHmtx (tabs M.! "maxp") (tabs M.! "hhea"))
         "loca" -> liftM LocaTable (getLoca (tabs M.! "maxp") (tabs M.! "head"))
         "maxp" -> liftM MaxpTable get
         "name" -> liftM NameTable get
@@ -108,6 +110,7 @@ fromTag tag bs tabs = do
 tagFromTable t =
     case t of
         (CmapTable _) -> BArray "cmap"
+        (FpgmTable _) -> BArray "fpgm"
         (GlyfTable _) -> BArray "glyf"
         (HeadTable _) -> BArray "head"
         (HheaTable _) -> BArray "hhea"
@@ -183,6 +186,7 @@ tableEntry tag table offset = TableDef tag (tableChecksum table) offset (fromInt
 
 data Table = CmapTable Cmap
     | GlyfTable Glyf
+    | FpgmTable Fpgm
     | HeadTable Head
     | HheaTable Hhea
     | HmtxTable Hmtx
@@ -193,9 +197,11 @@ data Table = CmapTable Cmap
     | UnknownTable BS.ByteString deriving (Generic, Show)
 instance Serialize Table where
     put (CmapTable t) = put t
+    put (FpgmTable t) = put t
     put (GlyfTable t) = put t
     put (HeadTable t) = put t
     put (HheaTable t) = put t
+    put (LocaTable t) = put t
     put (HmtxTable t) = put t
     put (MaxpTable t) = put t
     put (NameTable t) = put t
@@ -263,33 +269,97 @@ cmapFormat0 language glyphIndices =
     let n = (blength glyphIndices)+6
     in CmapFormat0 0 n language glyphIndices
 
+data Fpgm = Fpgm (BArray Word8) deriving (Generic, Show)
+instance Serialize Fpgm where
+    get = do
+        r <- remaining
+        bs <- getByteString r
+        return $ Fpgm $ BArray (BS.unpack bs)
+
 data Glyf = Glyf (BArray GlyfDesc) deriving (Generic, Show)
 instance Serialize Glyf
 
 --getGlyf (MaxpTable m) = liftM Glyf (getb (numGlyphs m))
+getAligned = do
+    pre <- remaining
+    x <- get
+    post <- remaining
+    let diff = post - pre
+    getN (3 - (diff - 1) `mod` 4) :: Get [Word8]
+    return x
+
 getGlyf (MaxpTable m) = do
-    x <- getb 1--(numGlyphs m)
-    return $ Glyf $ traceShow x x
+    --xs <- replicateM (fromIntegral $ numGlyphs m) getAligned
+    xs <- replicateM 4 getAligned
+    return $ Glyf $ BArray xs
+
+data Point = PointB Word8 | PointS Int16 deriving (Generic, Show)
+
+instance Serialize Point where
+    put (PointB p) = put p
+    put (PointS p) = put p
 
 data GlyfDesc = GlyfDesc {
-    nContours   :: Word16,
-    xMin        :: Int16,
-    yMin        :: Int16,
-    xMax        :: Int16,
-    yMax        :: Int16,
+    nContours   :: Int16,
+    xMin        :: FWord,
+    yMin        :: FWord,
+    xMax        :: FWord,
+    yMax        :: FWord,
     endPts      :: BArray Word16,
     instrs      :: PArray Word16 Word8,
     pflags      :: BArray Word8,
-    xs          :: BArray Word8,
-    ys          :: BArray Word8
+    xs          :: BArray Point,
+    ys          :: BArray Point
     } deriving (Generic, Show)
 
+getpflags n
+    | n > 0 = do
+        flag <- get 
+        if flag .&. 8 == 8
+            then do
+                rep <- get :: Get Word8
+                let flags = flag:(take (fromIntegral rep) $ repeat flag)
+                rest <- getpflags (n - 1)
+                return (flags ++ rest)
+            else do
+                rest <- getpflags (n - 1)
+                return (flag:rest)
+    | otherwise = return []
+
+getps i j (p:ps) prev = do
+    if p .&. i /= 0
+        then do
+            new  <- liftM PointB get
+            rest <- getps i j ps new
+            return (new:rest)
+        else if p .&. j == 0
+            then do
+                new  <- liftM PointS get
+                rest <- getps i j ps new 
+                return (new:rest)
+            else do
+                rest <- getps i j ps prev 
+                return (prev:rest)
+
+getps _ _ [] _ = return []
+ 
 instance Serialize GlyfDesc where
     get = do
-        n <- get
-        (GlyfDesc n) <$> get <*> get <*> get <*> get <*> 
-                         getb n <*> get <*> getb n <*> 
-                         getb n <*> getb n
+        nc <- get
+        if nc < 0
+            then error "Compound glyph!"
+            else simpleGlyph nc
+
+simpleGlyph nc = do
+    x0 <- get; y0 <- get
+    xm <- get; ym <- get
+    end <- getN nc
+    instrs <- get
+    let n = foldr max 0 $ map (+ 1) end
+    pflag <- getpflags n
+    xs <- getps 2 16 pflag (PointS 0)
+    ys <- getps 4 32 pflag (PointS 0)
+    return $ GlyfDesc nc x0 y0 xm ym (BArray end) instrs (BArray pflag) (BArray xs) (BArray ys) 
 
 {-
 data GlyphPoint = GPoint Word16 Word8 Int Int -- TODO: full glyph support
@@ -354,10 +424,13 @@ _loca entries = do mapM_ uint entries
 loca m = _loca $ map (\(k,v) -> v) (M.toList m)
 -}
 
-data Hmtx = Hmtx (BArray HmtxEntry) deriving (Generic, Show)
+data Hmtx = Hmtx (BArray HmtxEntry) (BArray FWord) deriving (Generic, Show)
 instance Serialize Hmtx
 
-getHmtx (HheaTable h) = liftM Hmtx (getb (nMetrics h))
+getHmtx (MaxpTable m) (HheaTable h) = do
+    let nhor = nMetrics h
+    let nglf = numGlyphs m
+    liftM2 Hmtx (getb nhor) (getb (nglf - nhor))
 
 data HmtxEntry = HmtxEntry {
     advanceWidth    :: Word16,
@@ -366,11 +439,13 @@ data HmtxEntry = HmtxEntry {
 instance Serialize HmtxEntry
 
 data Loca = LocaShort (BArray Word16) | LocaLong (BArray Word32) deriving (Generic, Show)
-instance Serialize Loca
+instance Serialize Loca where
+    put (LocaShort ws) = put ws
+    put (LocaLong ws)  = put ws
 
 getLoca (MaxpTable m) (HeadTable h) =
     let fmt = iToLoc h
-        n = numGlyphs m
+        n = (numGlyphs m)+1
     in case fmt of
         0 -> liftM LocaShort (getb n)
         1 -> liftM LocaLong (getb n)
