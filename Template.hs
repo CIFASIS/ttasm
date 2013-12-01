@@ -279,18 +279,17 @@ instance Serialize Fpgm where
 data Glyf = Glyf (BArray GlyfDesc) deriving (Generic, Show)
 instance Serialize Glyf
 
---getGlyf (MaxpTable m) = liftM Glyf (getb (numGlyphs m))
 getAligned = do
     pre <- remaining
     x <- get
     post <- remaining
-    let diff = post - pre
-    getN (3 - (diff - 1) `mod` 4) :: Get [Word8]
+    let diff = pre - post
+    let npad = if diff `mod` 2 == 0 then 0 else 1
+    getN npad :: Get [Word8]
     return x
 
 getGlyf (MaxpTable m) = do
-    --xs <- replicateM (fromIntegral $ numGlyphs m) getAligned
-    xs <- replicateM 4 getAligned
+    xs <- replicateM (fromIntegral $ numGlyphs m) getAligned
     return $ Glyf $ BArray xs
 
 data Point = PointB Word8 | PointS Int16 deriving (Generic, Show)
@@ -319,7 +318,7 @@ getpflags n
             then do
                 rep <- get :: Get Word8
                 let flags = flag:(take (fromIntegral rep) $ repeat flag)
-                rest <- getpflags (n - 1)
+                rest <- getpflags (n - 1 - (fromIntegral rep))
                 return (flags ++ rest)
             else do
                 rest <- getpflags (n - 1)
@@ -329,7 +328,8 @@ getpflags n
 getps i j (p:ps) prev = do
     if p .&. i /= 0
         then do
-            new  <- liftM PointB get
+            num <- get
+            let new = PointB (if p .&. j == 0 then num else -num)
             rest <- getps i j ps new
             return (new:rest)
         else if p .&. j == 0
