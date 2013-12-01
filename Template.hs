@@ -97,7 +97,7 @@ fromTag tag bs tabs = do
     case tag of
         --"cmap" -> liftM CmapTable get
         "fpgm" -> liftM FpgmTable get
-        "glyf" -> liftM GlyfTable (getGlyf (tabs M.! "maxp"))
+        "glyf" -> liftM GlyfTable (getGlyf (tabs M.! "maxp") (tabs M.! "head"))
         "head" -> liftM HeadTable get
         "hhea" -> liftM HheaTable get
         "hmtx" -> liftM HmtxTable (getHmtx (tabs M.! "maxp") (tabs M.! "hhea"))
@@ -279,17 +279,19 @@ instance Serialize Fpgm where
 data Glyf = Glyf (BArray GlyfDesc) deriving (Generic, Show)
 instance Serialize Glyf
 
-getAligned = do
+getAligned long = do
     pre <- remaining
     x <- get
     post <- remaining
     let diff = pre - post
-    let npad = if diff `mod` 2 == 0 then 0 else 1
-    getN npad :: Get [Word8]
+    let npad = if long == 1
+        then 3 - ((diff - 1) `mod` 4)
+        else (if diff `mod` 2 == 1 then 1 else 0)
+    got <- getN npad :: Get [Word8]
     return x
 
-getGlyf (MaxpTable m) = do
-    xs <- replicateM (fromIntegral $ numGlyphs m) getAligned
+getGlyf (MaxpTable m) (HeadTable h) = do
+    xs <- replicateM (fromIntegral $ numGlyphs m) $ getAligned $ iToLoc h
     return $ Glyf $ BArray xs
 
 data Point = PointB Word8 | PointS Int16 deriving (Generic, Show)
