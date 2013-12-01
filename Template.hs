@@ -95,9 +95,9 @@ tableFromTag start (TableDef (BArray tag) _ off len) tabs = do
 fromTag :: String -> BS.ByteString -> M.Map String Table -> Get Table
 fromTag tag bs tabs = do
     case tag of
-        --"cmap" -> liftM CmapTable get
+        "cmap" -> liftM CmapTable get
         "fpgm" -> liftM FpgmTable get
-        "glyf" -> liftM GlyfTable (getGlyf (tabs M.! "maxp") (tabs M.! "head"))
+        --"glyf" -> liftM GlyfTable (getGlyf (tabs M.! "maxp") (tabs M.! "head"))
         "head" -> liftM HeadTable get
         "hhea" -> liftM HheaTable get
         "hmtx" -> liftM HmtxTable (getHmtx (tabs M.! "maxp") (tabs M.! "hhea"))
@@ -217,24 +217,14 @@ data Cmap = Cmap {
 instance Serialize Cmap where
     get = do
         vers <- get
-        encs@(PArray c _) <- get
-        liftM (Cmap vers encs) (getb c)
-
-{-
-cmap entries =
-    let n = fromIntegral $ length entries
-        c ((CEntry p ps t):cs) o = ((cmapEnc p ps o), t):(c cs (o+(fromIntegral $ slen t)))
-        c [] _ = []
-        cs = c entries (4+6*n)
-        encs = sequence_ $ map fst cs
-        tables = sequence_ $ map snd cs
-    in _cmapTable 0 n encs tables
--}
+        encs@(PArray _ es) <- get
+        let fmts = length $ nub $ map encOff es
+        liftM (Cmap vers encs) (getb fmts)
 
 data CmapEnc = CmapEnc {
     pID       :: Word16,
     pSpecID   :: Word16,
-    encOff    :: Word16
+    encOff    :: Word32
     } deriving (Generic, Show)
 instance Serialize CmapEnc
 
@@ -243,22 +233,30 @@ data CmapFormat = CmapFormat0 {
     formatLen   :: Word16,
     formatLang  :: Word16,
     glyphIndices:: BArray Word8
-    } | CmapUnknown Word32 Word16 BS.ByteString deriving (Generic, Show)
+    } | CmapUnknown16 Word16 Word16 BS.ByteString | CmapUnknown32 Word32 Word32 BS.ByteString deriving (Generic, Show)
 
 instance Serialize CmapFormat where
     get = do
         fmt <- get
-        case fmt of
-            0 -> do
-                flen <- get
-                liftM2 (CmapFormat0 0 flen) get (getb (flen-6))
-            _ -> do
-                flen <- get
-                liftM (CmapUnknown fmt flen) (getBytes $ (fromIntegral flen)-4)
+        if fmt == 0 then do
+            flen <- get
+            liftM2 (CmapFormat0 0 flen) get (getb (flen-6))
+        else if fmt == 2 || fmt == 4 || fmt == 6 then do
+            flen <- get
+            liftM (CmapUnknown16 fmt flen) (getBytes $ (fromIntegral flen)-4)
+        else do
+            fmt2 <- get :: Get Word16
+            flen <- get
+            let fmt32 = ((fromIntegral fmt) `shift` 16) .|. (fromIntegral fmt2)
+            liftM (CmapUnknown32 fmt32 flen) (getBytes $ (fromIntegral flen)-8)
+            
     put (CmapFormat0 f l a g) = do
         puts [f, l, a]
         put g
-    put (CmapUnknown f l bs) = do
+    put (CmapUnknown16 f l bs) = do
+        put f; put l
+        putByteString bs
+    put (CmapUnknown32 f l bs) = do
         put f; put l
         putByteString bs
 
@@ -276,7 +274,7 @@ instance Serialize Fpgm where
         bs <- getByteString r
         return $ Fpgm $ BArray (BS.unpack bs)
 
-data Glyf = Glyf (BArray GlyfDesc) deriving (Generic, Show)
+data Glyf = Glyf (BArray GlyphDesc) deriving (Generic, Show)
 instance Serialize Glyf
 
 getAligned long = do
@@ -300,18 +298,38 @@ instance Serialize Point where
     put (PointB p) = put p
     put (PointS p) = put p
 
-data GlyfDesc = GlyfDesc {
+data GlyphDesc = GlyphDesc {
     nContours   :: Int16,
     xMin        :: FWord,
     yMin        :: FWord,
     xMax        :: FWord,
     yMax        :: FWord,
+    glyph       :: Glyph
+} deriving (Generic, Show)
+
+data Glyph = SimpleGlyph {
     endPts      :: BArray Word16,
     instrs      :: PArray Word16 Word8,
     pflags      :: BArray Word8,
     xs          :: BArray Point,
     ys          :: BArray Point
+    } | CompoundGlyph {
+    cflags      :: Word16,
+    glyphIndex  :: Word16,
+    arg1        :: Point,
+    arg2        :: Point,
+    trans       :: Point
     } deriving (Generic, Show)
+
+instance Serialize Glyph where
+    get = error "Serializing lone glyph"
+    put (SimpleGlyph e i p x y) = do
+        put e; put i; put p
+        put x; put y
+    put (CompoundGlyph c g a1 a2 t) = do
+        put c; put g
+        put a1; put a2
+        put t
 
 getpflags n
     | n > 0 = do
@@ -345,23 +363,24 @@ getps i j (p:ps) prev = do
 
 getps _ _ [] _ = return []
  
-instance Serialize GlyfDesc where
+instance Serialize GlyphDesc where
     get = do
         nc <- get
+        x0 <- get; y0 <- get
+        xm <- get; ym <- get
+        let gp = GlyphDesc nc x0 y0 xm ym
         if nc < 0
             then error "Compound glyph!"
-            else simpleGlyph nc
+            else liftM gp (simpleGlyph nc)
 
 simpleGlyph nc = do
-    x0 <- get; y0 <- get
-    xm <- get; ym <- get
     end <- getN nc
     instrs <- get
     let n = foldr max 0 $ map (+ 1) end
     pflag <- getpflags n
     xs <- getps 2 16 pflag (PointS 0)
     ys <- getps 4 32 pflag (PointS 0)
-    return $ GlyfDesc nc x0 y0 xm ym (BArray end) instrs (BArray pflag) (BArray xs) (BArray ys) 
+    return $ SimpleGlyph (BArray end) instrs (BArray pflag) (BArray xs) (BArray ys) 
 
 {-
 data GlyphPoint = GPoint Word16 Word8 Int Int -- TODO: full glyph support
