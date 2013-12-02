@@ -96,6 +96,7 @@ fromTag :: String -> BS.ByteString -> M.Map String Table -> Get Table
 fromTag tag bs tabs = do
     case tag of
         "cmap" -> liftM CmapTable get
+        "cvt " -> liftM CvtTable  get
         "fpgm" -> liftM FpgmTable get
         --"glyf" -> liftM GlyfTable (getGlyf (tabs M.! "maxp") (tabs M.! "head"))
         "head" -> liftM HeadTable get
@@ -105,11 +106,12 @@ fromTag tag bs tabs = do
         "maxp" -> liftM MaxpTable get
         "name" -> liftM NameTable get
         "post" -> liftM PostTable get
-        _      -> return $ UnknownTable bs
+        _      -> return $ UnknownTable tag bs
 
 tagFromTable t =
     case t of
         (CmapTable _) -> BArray "cmap"
+        (CvtTable  _) -> BArray "cmap"
         (FpgmTable _) -> BArray "fpgm"
         (GlyfTable _) -> BArray "glyf"
         (HeadTable _) -> BArray "head"
@@ -119,7 +121,7 @@ tagFromTable t =
         (MaxpTable _) -> BArray "maxp"
         (NameTable _) -> BArray "name"
         (PostTable _) -> BArray "post"
-        (UnknownTable _) -> BArray "????" --tag
+        (UnknownTable tag _) -> BArray tag
 
 padbs bs = 
     let bsl = fromIntegral $ BS.length bs
@@ -185,6 +187,7 @@ tableChecksum table =
 tableEntry tag table offset = TableDef tag (tableChecksum table) offset (fromIntegral $ BS.length table)
 
 data Table = CmapTable Cmap
+    | CvtTable  Cvt
     | GlyfTable Glyf
     | FpgmTable Fpgm
     | HeadTable Head
@@ -194,9 +197,10 @@ data Table = CmapTable Cmap
     | MaxpTable Maxp
     | NameTable Name
     | PostTable Post
-    | UnknownTable BS.ByteString deriving (Generic, Show)
+    | UnknownTable String BS.ByteString deriving (Generic, Show)
 instance Serialize Table where
     put (CmapTable t) = put t
+    put (CvtTable  t) = put t
     put (FpgmTable t) = put t
     put (GlyfTable t) = put t
     put (HeadTable t) = put t
@@ -206,7 +210,7 @@ instance Serialize Table where
     put (MaxpTable t) = put t
     put (NameTable t) = put t
     put (PostTable t) = put t
-    put (UnknownTable bs) = putByteString bs
+    put (UnknownTable _ bs) = putByteString bs
 
 data Cmap = Cmap {
     version :: Word16,
@@ -266,6 +270,12 @@ blength (BArray bs) = fromIntegral $ length bs
 cmapFormat0 language glyphIndices =
     let n = (blength glyphIndices)+6
     in CmapFormat0 0 n language glyphIndices
+
+data Cvt = Cvt (BArray FWord) deriving (Generic, Show)
+instance Serialize Cvt where
+    get = do
+        r <- remaining
+        liftM Cvt (getb (r `shift` (-1)))
 
 data Fpgm = Fpgm (BArray Word8) deriving (Generic, Show)
 instance Serialize Fpgm where
