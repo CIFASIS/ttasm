@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveGeneric, DefaultSignatures, FlexibleInstances, OverlappingInstances #-}
+{-# LANGUAGE DeriveGeneric, DefaultSignatures, FlexibleInstances, OverlappingInstances, DoAndIfThenElse #-}
 module Template where
 
 import Data.Serialize

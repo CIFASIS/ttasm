@@ -1,0 +1,31 @@
+name:                ttasm
+version:             0.1
+synopsis:            xx
+description:
+        xx
+
+homepage:            https://github.com/CIFASIS/ttasm
+license:             GPL-3
+license-file:        LICENSE
+author:              jseaton
+category:            Fonts
+build-type:          Simple
+cabal-version:       >=1.8
+
+Flag debug
+     Default: False
+
+library
+  exposed-modules:  TTFInstructions
+
+  if flag(debug)
+    ghc-prof-options: -prof, -fprof-auto
+
+  build-depends:       base >=4.6 && <5,
+                       containers >= 0.4.2.1,
+                       bytestring >= 0.9,
+                       binary,
+                       cereal,
+                       bitwise,
+                       monad-loops,
+                       mtl

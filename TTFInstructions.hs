@@ -1,4 +1,4 @@
-module Instructions where
+module TTFInstructions where
  
  
 import qualified Data.Map as M
