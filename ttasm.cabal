@@ -21,11 +21,10 @@ library
   if flag(debug)
     ghc-prof-options: -prof, -fprof-auto
 
-  build-depends:       base >=4.6 && <5,
+  build-depends:       base,
                        containers >= 0.4.2.1,
                        bytestring >= 0.9,
                        binary,
-                       cereal,
                        bitwise,
                        monad-loops,
                        mtl
