@@ -126,8 +126,8 @@ _tableDef tag checkSum offset len
 
 tableChecksum table =
     let tc = do
-        e <- remaining
-        if e < 4
+          e <- remaining
+          if e < 4
             then return 0
             else do w <- getWord32be
                     r <- tc
